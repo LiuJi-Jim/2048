@@ -10,7 +10,41 @@ function GameManager(size, InputManager, Actuator, StorageManager) {
   this.inputManager.on("restart", this.restart.bind(this));
   this.inputManager.on("keepPlaying", this.keepPlaying.bind(this));
 
+  this.Q = new LRUCache({
+    max: 1e6
+  })
+  this.QL_alpha = 0.7
+  this.explore = 0.00
+  this.moved = false
+
   this.setup();
+}
+
+GameManager.prototype.getS = function() {
+  var s = this.serialize()
+  var grid2d = []
+  var grid1d = []
+  // 行列转换
+  for (var j = 0; j < this.size; ++j) {
+    var column = s.grid.cells[j]
+    for (var i = 0; i < this.size; ++i) {
+      var cell = column[i]
+      var row = grid2d[i] || (grid2d[i] = [])
+      var value = cell ? Math.log2(cell.value) : 0
+      row[j] = value
+      grid1d[i * this.size + j] = value
+    }
+  }
+  var result = {
+    grid2d: grid2d,
+    grid1d: grid1d,
+    hash: grid1d.map(function(n) {
+      return n.toString(16).toUpperCase()
+    }).join(''),
+    over: s.over,
+    score: s.score
+  }
+  return result
 }
 
 // Restart the game
@@ -54,6 +88,8 @@ GameManager.prototype.setup = function () {
     this.addStartTiles();
   }
 
+  this.lastS = this.getS()
+
   // Update the actuator
   this.actuate();
 };
@@ -96,6 +132,64 @@ GameManager.prototype.actuate = function () {
     terminated: this.isGameTerminated()
   });
 
+  var me = this
+  var s = this.getS()
+  var lastS = this.lastS
+  var reward = 0
+  if (s.over) {
+    reward = -1000000
+  } else {
+    reward = s.score - lastS.score
+  }
+
+  this.lastS = s
+
+  // Step 2: Observe State S'
+  var hash = s.hash
+  var qsa = this.Q.get(hash)
+  if (!qsa) {
+    qsa = [Math.random(), Math.random(), Math.random(), Math.random()]
+    this.Q.set(hash, qsa)
+  }
+  // Step 3: Update Q(S, A)
+  if (lastS.direction) {
+    var lastAction = lastS.direction
+
+    var lastHash = lastS.hash
+    var lastQsa = this.Q.get(lastHash)
+    if (!lastQsa) {
+      lastQsa = [Math.random(), Math.random(), Math.random(), Math.random()]
+      this.Q.set(lastHash, lastQsa)
+    }
+    var maxV = Math.max.apply(null, lastQsa)
+    var oldValue = lastQsa[lastAction]
+    lastQsa[lastAction] = oldValue + this.QL_alpha * (reward + maxV - oldValue)
+  }
+  // Step 4: S <- S'
+  if (s.over) {
+    setTimeout(function() {
+      me.inputManager.emit('restart')
+    }, 500)
+  } else {
+    var action_to_perform
+    if (Math.random() < this.explore) {
+      action_to_perform = Math.floor(Math.random() * 4)
+    } else {
+      var moves_to_choose = qsa.map(function(v, i) {
+        return { v: v, dir: i }
+      })
+      moves_to_choose.sort(function(a, b) {
+        if (!me.moved && a.dir === lastS.direction) return 1
+        if (!me.moved && b.dir === lastS.direction) return -1
+        return a.v - b.v
+      })
+      action_to_perform = moves_to_choose[0].dir
+    }
+
+    setTimeout(function() {
+      me.move(action_to_perform)
+    }, 200)
+  }
 };
 
 // Represent the current game as an object
@@ -178,6 +272,7 @@ GameManager.prototype.move = function (direction) {
       }
     });
   });
+  this.lastS.direction = direction
 
   if (moved) {
     this.addRandomTile();
@@ -186,8 +281,9 @@ GameManager.prototype.move = function (direction) {
       this.over = true; // Game over!
     }
 
-    this.actuate();
   }
+  this.moved = moved
+  this.actuate();
 };
 
 // Get the vector representing the chosen direction
